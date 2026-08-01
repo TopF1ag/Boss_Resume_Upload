@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "BOSS投递助手",
+  "version": "2.0.0",
+  "description": "基于混合架构的BOSS直聘页内投递辅助工具",
+  "action": {
+    "default_popup": "index.html"
+  },
+  "background": {
+    "service_worker": "src/background/index.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.zhipin.com/web/geek/job*",
+        "https://www.zhipin.com/web/geek/jobs*",
+        "https://www.zhipin.com/web/geek/job-recommend*"
+      ],
+      "js": ["src/content/interceptor.ts"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.zhipin.com/web/geek/job*",
+        "https://www.zhipin.com/web/geek/jobs*",
+        "https://www.zhipin.com/web/geek/job-recommend*"
+      ],
+      "js": ["src/content/index.ts"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "storage",
+    "activeTab",
+    "notifications",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://www.zhipin.com/*"
+  ]
+}
