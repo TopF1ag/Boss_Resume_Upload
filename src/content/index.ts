@@ -452,16 +452,17 @@ async function executeDeliveryLoop(): Promise<void> {
 
       const forceScrollToBottom = () => {
         // 1. 将最后一个卡片滚动到底部
-        const cards = document.querySelectorAll('.job-card-wrapper, .search-job-result li, .job-list-box li, li[ka]');
+        const cards = document.querySelectorAll('.job-card-wrapper, .search-job-result li, .job-list-box li, .job-card-box, li[ka]');
         if (cards.length > 0) {
           const lastCard = cards[cards.length - 1];
           lastCard.scrollIntoView({ behavior: 'smooth', block: 'end' });
 
-          // 2. 暴力遍历所有父节点，将任何带有滚动条的容器滚到底部
+          // 2. 暴力遍历所有父节点，将任何带有滚动条的容器滚到底部并触发事件
           let parent = lastCard.parentElement;
           while (parent && parent !== document.body && parent !== document.documentElement) {
             if (parent.scrollHeight > parent.clientHeight) {
               parent.scrollTop = parent.scrollHeight;
+              parent.dispatchEvent(new Event('scroll', { bubbles: true }));
             }
             parent = parent.parentElement;
           }
@@ -469,22 +470,40 @@ async function executeDeliveryLoop(): Promise<void> {
 
         // 3. 兜底全局滚动
         window.scrollTo(0, document.body.scrollHeight);
+        window.dispatchEvent(new Event('scroll'));
 
         // 4. 特殊照顾已知的常见列表容器
-        const wrappers = document.querySelectorAll('.job-list-wrapper, .search-job-result, .recommend-job-list, .job-list-box, .search-job-list-wrap');
+        const wrappers = document.querySelectorAll('.job-list-wrapper, .job-list-container, .search-job-result, .recommend-job-list, .job-list-box, .search-job-list-wrap, .job-tab-box');
         wrappers.forEach(w => {
           if (w.scrollHeight > w.clientHeight) {
             w.scrollTop = w.scrollHeight;
+            w.dispatchEvent(new Event('scroll', { bubbles: true }));
           }
         });
 
-        // 5. 检查是否有“点击加载更多”按钮并点击
+        // 5. 检查是否有“点击加载更多”按钮并点击（严格排除右侧详情面板，防止误触"查看更多信息"等跳转按钮）
         const moreBtns = document.querySelectorAll('button, a, div[class*="load-more"], div[class*="loadmore"]');
         for (const btn of moreBtns) {
-          const text = (btn.textContent || '').trim();
-          if (text.includes('加载更多') || text.includes('查看更多') || text === '显示更多') {
+          // 绝对排除右侧详情面板内部的所有元素
+          if (btn.closest('.job-detail-box, .job-detail-body, .job-detail-wrapper, .detail-box, [class*="job-detail"], .job-detail-section')) {
+            continue;
+          }
+
+          const text = (btn.textContent || '').trim().replace(/\s+/g, ' ');
+          // 严格排除详情跳转文案
+          if (text.includes('更多信息') || text.includes('查看更多信息') || text.includes('完整信息')) {
+            continue;
+          }
+
+          // 仅匹配明确的列表加载更多文案
+          if (text === '加载更多' || text === '点击加载更多' || text === '显示更多' || text === '加载更多职位' || (text.includes('加载更多') && !text.includes('信息'))) {
             const rect = btn.getBoundingClientRect();
             if (rect.width > 0 && rect.height > 0) {
+              console.log('[Engine] 找到列表"加载更多"按钮，执行点击:', text);
+              const anchor = btn.closest('a') || (btn.tagName === 'A' ? btn : null);
+              if (anchor) {
+                anchor.addEventListener('click', (e: Event) => e.preventDefault(), { once: true, capture: true });
+              }
               (btn as HTMLElement).click();
               break;
             }
@@ -505,11 +524,19 @@ async function executeDeliveryLoop(): Promise<void> {
       await humanDelay(500, 1000);
       pageWait++;
 
-      // 如果是滚动加载，每隔几次重试触发滚动事件
+      // 如果是滚动加载，每隔几次重试触发滚动事件（全局与列表容器）
       if (!nextBtn && pageWait % 2 === 0) {
         window.scrollTo(0, document.body.scrollHeight);
         window.dispatchEvent(new Event('scroll'));
         document.dispatchEvent(new Event('scroll'));
+
+        const wrappers = document.querySelectorAll('.job-list-wrapper, .job-list-container, .search-job-result, .recommend-job-list, .job-list-box, .search-job-list-wrap, .job-tab-box');
+        wrappers.forEach(w => {
+          if (w.scrollHeight > w.clientHeight) {
+            w.scrollTop = w.scrollHeight;
+            w.dispatchEvent(new Event('scroll', { bubbles: true }));
+          }
+        });
       }
 
       // 每 5 秒输出一次等待状态

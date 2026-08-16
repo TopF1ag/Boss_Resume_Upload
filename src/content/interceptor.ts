@@ -266,7 +266,7 @@ try {
 try {
   const originalOpen = window.open;
   window.open = function(url?: string | URL, target?: string, features?: string): Window | null {
-    if (isDeliveryActive() && url && isBlockedNavigation(String(url)) && (!target || target === '_self')) {
+    if (isDeliveryActive() && url && isBlockedNavigation(String(url))) {
       console.log(
         '%c[Interceptor] 🚫 拦截 window.open 跳转: ' + url,
         'color: #e74c3c; font-weight: bold;'
