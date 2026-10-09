@@ -23,8 +23,11 @@ import { bionicClick, scrollToElement, humanDelay } from './api/engine';
 // 全局状态
 // ============================================================
 
-/** 从 Interceptor 截获的岗位数据池 */
+/** 从 Interceptor 截获的岗位数据队列（累积式追加，不覆盖） */
 let interceptedJobs: JobItem[] = [];
+
+/** 已处理的岗位 ID 集合，用于去重（防止瀑布流重复请求导致重复投递或跳页） */
+const processedJobIds = new Set<string>();
 
 /** 用户配置 */
 let userConfig: DeliveryConfig = { ...DEFAULT_CONFIG };
@@ -66,9 +69,18 @@ window.addEventListener('message', (event: MessageEvent) => {
 
   const list = zpData?.jobList || zpData?.list || zpData?.cardList || zpData?.jobCardList;
   if (data?.code === 0 && Array.isArray(list) && list.length > 0) {
-    interceptedJobs = list;
+    // 去重追加而非覆盖：防止瀑布流多次滚动触发的重复 API 请求导致数据丢失
+    const existingIds = new Set(interceptedJobs.map(j => j.encryptJobId));
+    let appendedCount = 0;
+    for (const job of list) {
+      if (job.encryptJobId && !existingIds.has(job.encryptJobId) && !processedJobIds.has(job.encryptJobId)) {
+        interceptedJobs.push(job);
+        existingIds.add(job.encryptJobId);
+        appendedCount++;
+      }
+    }
     console.log(
-      `%c[Engine] 接收到 ${interceptedJobs.length} 条岗位数据`,
+      `%c[Engine] 接收到 ${list.length} 条数据，${appendedCount} 条新增（队列总计 ${interceptedJobs.length}）`,
       'color: #2ecc71; font-weight: bold;'
     );
   }
@@ -153,10 +165,12 @@ function isDailySalaryFormat(salaryDesc: string): boolean {
  * 根据用户配置判断岗位是否应被投递
  */
 function shouldDeliver(job: JobItem, config: DeliveryConfig): { pass: boolean; reason?: string } {
+  // 规范化薪资描述（若接口为空或未定义，默认为"面议"）
+  const salaryText = (job.salaryDesc || '面议').trim();
   const jobLabelsText = (job.jobLabels || []).join(' ');
   const welfareText = (job.welfareList || []).join(' ');
   const skillsText = (job.skills || []).join(' ');
-  const jobText = `${job.jobName} ${job.brandName} ${job.brandIndustry} ${jobLabelsText} ${welfareText} ${skillsText}`.toLowerCase();
+  const jobText = `${job.jobName} ${job.brandName} ${job.brandIndustry} ${jobLabelsText} ${welfareText} ${skillsText} ${salaryText}`.toLowerCase();
 
   // 黑名单关键词检查
   for (const keyword of config.blacklistKeywords) {
@@ -184,10 +198,10 @@ function shouldDeliver(job: JobItem, config: DeliveryConfig): { pass: boolean; r
   }
 
   // 薪资过滤：根据格式自动区分全职月薪（K）和实习日薪（元/天）
-  if (isDailySalaryFormat(job.salaryDesc)) {
+  if (isDailySalaryFormat(salaryText)) {
     // ---- 实习岗位：日薪过滤 ----
     if (config.dailySalaryMin > 0 || config.dailySalaryMax > 0) {
-      const daily = parseDailySalary(job.salaryDesc);
+      const daily = parseDailySalary(salaryText);
       if (daily) {
         if (config.dailySalaryMin > 0 && daily.max < config.dailySalaryMin) {
           return { pass: false, reason: `日薪上限 ${daily.max}元/天 < 要求最低 ${config.dailySalaryMin}元/天` };
@@ -195,12 +209,15 @@ function shouldDeliver(job: JobItem, config: DeliveryConfig): { pass: boolean; r
         if (config.dailySalaryMax > 0 && daily.min > config.dailySalaryMax) {
           return { pass: false, reason: `日薪下限 ${daily.min}元/天 > 要求最高 ${config.dailySalaryMax}元/天` };
         }
+      } else {
+        // 日薪无法解析，用户设置了日薪范围时拒绝
+        return { pass: false, reason: `日薪"${salaryText}"无法解析，不满足日薪过滤条件` };
       }
     }
   } else {
     // ---- 全职岗位：月薪过滤 ----
     if (config.salaryMin > 0 || config.salaryMax > 0) {
-      const salary = parseMonthlySalary(job.salaryDesc);
+      const salary = parseMonthlySalary(salaryText);
       if (salary) {
         if (config.salaryMin > 0 && salary.max < config.salaryMin) {
           return { pass: false, reason: `月薪上限 ${salary.max}K < 要求最低 ${config.salaryMin}K` };
@@ -208,6 +225,9 @@ function shouldDeliver(job: JobItem, config: DeliveryConfig): { pass: boolean; r
         if (config.salaryMax > 0 && salary.min > config.salaryMax) {
           return { pass: false, reason: `月薪下限 ${salary.min}K > 要求最高 ${config.salaryMax}K` };
         }
+      } else {
+        // 薪资无法解析（如"面议"），用户设置了薪资范围时拒绝
+        return { pass: false, reason: `薪资"${salaryText}"无法解析，不满足薪资过滤条件` };
       }
     }
   }
@@ -394,6 +414,7 @@ async function executeDeliveryLoop(): Promise<void> {
   skippedCount = 0;
   totalScanned = 0;
   isCircuitBroken = false;
+  processedJobIds.clear();
 
   // 通知 Interceptor 开启导航拦截
   document.body.setAttribute('data-boss-delivery-active', 'true');
@@ -419,8 +440,8 @@ async function executeDeliveryLoop(): Promise<void> {
     // Step 1: 尝试找到"下一页"按钮
     const nextBtn = findNextPageButton();
 
-    // Step 2: 清空旧数据，准备接收新数据
-    interceptedJobs = [];
+    // Step 2: 记录当前队列长度，用于检测新数据到达（不清空，因为是累积队列）
+    const queueLengthBeforeLoad = interceptedJobs.length;
 
     if (nextBtn) {
       // ---- 分页翻页模式 ----
@@ -520,7 +541,7 @@ async function executeDeliveryLoop(): Promise<void> {
     const maxWaitIterations = 20; // 最多等待约 10-20 秒
     console.log('[Engine] ⏳ 等待新岗位数据到达...');
 
-    while (interceptedJobs.length === 0 && pageWait < maxWaitIterations) {
+    while (interceptedJobs.length <= queueLengthBeforeLoad && pageWait < maxWaitIterations) {
       await humanDelay(500, 1000);
       pageWait++;
 
@@ -546,7 +567,7 @@ async function executeDeliveryLoop(): Promise<void> {
     }
 
     // 兜底方案：如果网络拦截未抓到新接口，直接从 DOM 中解析页面所有岗位卡片
-    if (interceptedJobs.length === 0) {
+    if (interceptedJobs.length <= queueLengthBeforeLoad) {
       console.log('[Engine] ⚠️ 网络拦截未捕获到新数据，启动 DOM 兜底解析...');
       const domCards = document.querySelectorAll('.job-card-wrapper, .search-job-result li, .job-list-box li, li[ka]');
       const parsedJobs: any[] = [];
@@ -564,7 +585,7 @@ async function executeDeliveryLoop(): Promise<void> {
               encryptJobId,
               jobName: jobName || '未知岗位',
               brandName: brandName || '未知公司',
-              salaryDesc: salaryDesc || '面议',
+              salaryDesc: salaryDesc || '',
               cityName: '',
               areaDistrict: '',
               businessDistrict: '',
@@ -579,22 +600,34 @@ async function executeDeliveryLoop(): Promise<void> {
       });
 
       if (parsedJobs.length > 0) {
-        interceptedJobs = parsedJobs;
-        console.log(`[Engine] ✅ 成功从 DOM 提取到 ${interceptedJobs.length} 条岗位卡片`);
+        // 去重追加到队列
+        const knownIds = new Set(interceptedJobs.map(j => j.encryptJobId));
+        let domNewCount = 0;
+        for (const pj of parsedJobs) {
+          if (!knownIds.has(pj.encryptJobId) && !processedJobIds.has(pj.encryptJobId)) {
+            interceptedJobs.push(pj);
+            knownIds.add(pj.encryptJobId);
+            domNewCount++;
+          }
+        }
+        if (domNewCount > 0) {
+          console.log(`[Engine] ✅ DOM 兜底：解析到 ${parsedJobs.length} 条卡片，${domNewCount} 条为新数据`);
+        }
       }
     }
 
-    if (interceptedJobs.length === 0) {
+    if (interceptedJobs.length <= queueLengthBeforeLoad) {
       console.warn(
-        '%c[Engine] ⚠️ 翻页后未收到新数据，停止任务。' +
-        '可能原因: 已到最后一页，或翻页未成功触发新 API 请求。',
+        '%c[Engine] ⚠️ 滚动/翻页后未收到新数据，停止任务。' +
+        '可能原因: 已到列表末尾，或滚动/翻页未成功触发新 API 请求。',
         'color: #e74c3c; font-weight: bold;'
       );
       break;
     }
 
+    const newJobCount = interceptedJobs.length - queueLengthBeforeLoad;
     console.log(
-      `%c[Engine] ✅ 收到 ${interceptedJobs.length} 条新岗位数据，继续处理`,
+      `%c[Engine] ✅ 新增 ${newJobCount} 条岗位数据（队列总计 ${interceptedJobs.length}），继续处理`,
       'color: #2ecc71; font-weight: bold;'
     );
     await processCurrentPage();
@@ -620,9 +653,14 @@ async function executeDeliveryLoop(): Promise<void> {
  * 处理当前页面的所有岗位
  */
 async function processCurrentPage(): Promise<void> {
-  const jobs = [...interceptedJobs]; // 快照
+  // 使用游标遍历而非快照：确保处理过程中新到达的数据也能被实时消费，
+  // 解决瀑布流滚动加载时因快照截断导致的"跳页"问题
+  let cursor = 0;
 
-  for (const job of jobs) {
+  while (cursor < interceptedJobs.length) {
+    const job = interceptedJobs[cursor];
+    cursor++;
+
     if (shouldStop || deliveredCount >= userConfig.maxDeliveryCount) break;
 
     // 熔断等待
@@ -630,6 +668,10 @@ async function processCurrentPage(): Promise<void> {
       await humanDelay(1000, 2000);
     }
     if (shouldStop) break;
+
+    // 跳过已处理的岗位（累积队列去重）
+    if (processedJobIds.has(job.encryptJobId)) continue;
+    processedJobIds.add(job.encryptJobId);
 
     totalScanned++;
     setCurrentJobName(`${job.jobName} - ${job.brandName}`);
